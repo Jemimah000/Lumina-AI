@@ -1,177 +1,100 @@
-# 📚 Lumina Study Pulse
+# Lumina Study Pulse
 
-> **AI-Powered Study Assistant for Source-Grounded Learning**
+> AI-powered study assistant for answering questions from study materials.
 
-Lumina Study Pulse is an AI-powered study assistant that helps students understand their study materials faster.
+Lumina Study Pulse is a study assistant that allows students to upload their study materials as PDFs and ask questions about them.
 
-Students can upload a **PDF containing lecture notes, textbooks, or solved examples**, ask questions about the content, and receive **short, simple, and source-grounded answers** generated using only the uploaded study material.
+Instead of giving a general AI answer, the system searches the uploaded PDF, finds the relevant information, and uses it to generate a short and simple answer. It also shows the page or section from which the answer was taken.
 
----
+## Problem Statement
 
-## 🎯 Problem Statement
+Students usually have lecture notes, textbooks, and other study materials in PDF format. Finding a particular topic or answer from a large PDF can take a lot of time.
 
-Students often have large study PDFs, lecture transcripts, textbooks, and notes. Finding a specific answer inside these documents can be time-consuming.
+Normal AI chatbots can answer questions quickly, but their answers may not always be based on the student's actual study material.
 
-At the same time, generic AI assistants may provide answers that are:
+Lumina Study Pulse tries to solve this by making the uploaded study material the main source for answering questions.
 
-- ❌ Not based on the student's study material
-- ❌ Difficult to verify
-- ❌ Sometimes incorrect or hallucinated
-- ❌ Too long or complicated
+## How It Works
 
-**Lumina Study Pulse** solves this problem by searching the student's uploaded study material and generating answers based only on the relevant content.
+The basic process is:
 
----
+1. Student uploads a PDF.
+2. The text is extracted from the PDF.
+3. The extracted text is divided into smaller chunks.
+4. The chunks are converted into embeddings.
+5. The embeddings are stored in FAISS.
+6. The student asks a question.
+7. FAISS searches for the most relevant chunks.
+8. The relevant content is sent to Gemini.
+9. Gemini generates a short answer using the retrieved content.
+10. The source page/chunk is shown along with the answer.
 
-## 💡 Solution
+## Features
 
-Lumina Study Pulse provides a simple AI-powered chat interface where students can:
-
-1. **Upload a study PDF**
-2. **Ask questions about the PDF**
-3. **Search the relevant content**
-4. **Generate a concise AI answer**
-5. **View the source page/chunk used**
-6. **Get a clear message when the answer isn't available**
-
-The goal is to make studying **faster, simpler, and more trustworthy**.
-
----
-
-## 👥 Target Users
-
-Lumina Study Pulse is designed for:
-
-- 🎓 **College Students**
-- 🏫 **School Students**
-- 💻 **Online Learners**
-- 📖 **Self-Learners**
-
----
-
-# ✨ Features
-
-## 📄 1. Upload PDF
+### PDF Upload
 
 Students can upload their study material in PDF format.
 
-The system:
+The application extracts the text from the uploaded file and prepares it for searching.
 
-- Reads the PDF
-- Extracts the text
-- Identifies individual pages
-- Prepares the content for searching
+### Question and Answer
 
----
+Students can ask questions about the uploaded study material through a chat interface.
 
-## 💬 2. Ask Questions
+For example:
 
-Students can ask questions through a simple chatbot interface.
+> What is the Pumping Lemma?
 
-Example:
+The system searches the PDF and finds the relevant content before generating the answer.
 
-> **What is the Pumping Lemma?**
+### Source-Based Answers
 
-The system searches the uploaded study material for relevant information.
+The answer is generated using the content retrieved from the uploaded PDF.
 
----
-
-## 🔎 3. Find Relevant Information
-
-The extracted PDF content is divided into smaller chunks.
-
-These chunks are converted into **embeddings** and stored in a **FAISS vector database**.
-
-When a student asks a question, the system searches for the most relevant chunks.
-
----
-
-## 🤖 4. AI-Generated Answer
-
-The relevant content is sent to **Google Gemini** along with the student's question.
-
-Gemini generates a:
-
-- **Short**
-- **Simple**
-- **Clear**
-- **Source-based**
-
-answer using the retrieved study material.
-
----
-
-## 📌 5. Show Source
-
-Every answer should display where the information came from.
+The application also shows the source used for the answer.
 
 Example:
 
-> **Source:** Formal Languages Notes.pdf — Page 25
+> Source: Formal Languages Notes.pdf - Page 25
 
-This allows students to verify the answer directly from their study material.
+This makes it easier for students to check the answer from their original notes.
 
----
+### Answer Not Found
 
-## 🚫 6. Answer Not Found
+If the requested information cannot be found in the uploaded PDF, the system should not generate an unrelated answer.
 
-If the requested information cannot be found in the uploaded PDF, the system will not generate a random answer.
+Instead, it will show:
 
-Instead, it will display:
+> I couldn't find this information in the study material.
 
-> **"I couldn't find this information in the study material."**
-
-This helps reduce AI hallucinations and keeps answers grounded in the student's materials.
-
----
-
-# 🔄 System Flow
+## System Flow
 
 ```text
-                    ┌───────────────┐
-                    │   Upload PDF  │
-                    └───────┬───────┘
-                            │
-                            ▼
-                    ┌───────────────┐
-                    │  Extract Text │
-                    │    (pypdf)    │
-                    └───────┬───────┘
-                            │
-                            ▼
-                    ┌───────────────┐
-                    │ Split into    │
-                    │    Chunks     │
-                    └───────┬───────┘
-                            │
-                            ▼
-                    ┌───────────────┐
-                    │   Generate    │
-                    │   Embeddings  │
-                    └───────┬───────┘
-                            │
-                            ▼
-                    ┌───────────────┐
-                    │     FAISS     │
-                    │ Vector Store  │
-                    └───────┬───────┘
-                            │
-                            │
-                 Student asks question
-                            │
-                            ▼
-                    ┌───────────────┐
-                    │    Search     │
-                    │  Relevant     │
-                    │    Chunks     │
-                    └───────┬───────┘
-                            │
-                            ▼
-                    ┌───────────────┐
-                    │ Gemini AI API │
-                    └───────┬───────┘
-                            │
-                            ▼
-                 ┌─────────────────────┐
-                 │ Answer + Source     │
-                 └─────────────────────┘
+Upload PDF
+    |
+    v
+Extract PDF Text
+    |
+    v
+Split Text into Chunks
+    |
+    v
+Create Embeddings
+    |
+    v
+Store Embeddings in FAISS
+    |
+    v
+Student Asks Question
+    |
+    v
+Search Relevant Chunks
+    |
+    v
+Send Question + Context to Gemini
+    |
+    v
+Generate Answer
+    |
+    v
+Display Answer + Source
