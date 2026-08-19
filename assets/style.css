@@ -1,0 +1,194 @@
+/* ==========================================
+   GLOBAL FOUNDATION
+========================================== */
+html, body, [data-testid="stAppViewContainer"] {
+  background: linear-gradient(180deg, #f8fafc 0%, #eef4ff 100%);
+  color: #172033;
+  font-family: "Segoe UI", "Inter", sans-serif;
+}
+
+[data-testid="stHeader"], [data-testid="stToolbar"] {
+  background: transparent;
+}
+
+.block-container {
+  max-width: 1180px !important;
+  padding-top: 70px !important;
+  padding-left: 60px !important;
+  padding-right: 60px !important;
+}
+
+[data-testid="stSidebar"] {
+  background: rgba(255, 255, 255, 0.78);
+  backdrop-filter: blur(18px);
+  border-right: 1px solid rgba(104, 122, 164, 0.12);
+}
+
+/* ==========================================
+   SIDEBAR
+========================================== */
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 6px 2px 0;
+}
+
+.brand-icon {
+  width: 42px;
+  height: 42px;
+  border-radius: 14px;
+  display: grid;
+  place-items: center;
+  background: linear-gradient(135deg, #6c63ff 0%, #4f7cff 100%);
+  color: #ffffff;
+  font-size: 18px;
+  box-shadow: 0 12px 30px rgba(76, 102, 255, 0.24);
+}
+
+.brand-name {
+  font-size: 18px;
+  font-weight: 750;
+  letter-spacing: -0.03em;
+}
+
+.brand-tagline {
+  font-size: 13px;
+  color: #74819a;
+  margin-top: 2px;
+}
+
+.sidebar-space {
+  height: 18px;
+}
+
+.nav-space {
+  height: 8px;
+}
+
+.sidebar-bottom {
+  height: 26px;
+}
+
+[data-testid="stSidebar"] .stButton > button {
+  width: 100%;
+  border: 0;
+  border-radius: 16px;
+  background: transparent;
+  color: #21304f;
+  padding: 0.82rem 0.95rem;
+  text-align: left;
+  font-size: 0.98rem;
+  font-weight: 600;
+  box-shadow: none;
+}
+
+[data-testid="stSidebar"] .stButton > button:hover {
+  background: rgba(108, 99, 255, 0.09);
+}
+
+.profile {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 14px 2px 4px;
+  border-top: 1px solid rgba(104, 122, 164, 0.16);
+}
+
+.profile-avatar {
+  width: 42px;
+  height: 42px;
+  border-radius: 999px;
+  display: grid;
+  place-items: center;
+  background: linear-gradient(135deg, #eef1ff 0%, #dfe5ff 100%);
+  color: #4f5ec9;
+  font-weight: 800;
+}
+
+.profile-name {
+  font-size: 15px;
+  font-weight: 700;
+}
+
+.profile-role {
+  font-size: 13px;
+  color: #74819a;
+}
+
+/* ==========================================
+   WELCOME
+========================================== */
+.welcome {
+  max-width: 760px;
+  margin: 45px auto 0;
+  text-align: center;
+}
+
+.eyebrow {
+  display: inline-block;
+  padding: 7px 12px;
+  border-radius: 30px;
+  background: #efedff;
+  color: #6a60e8;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 1.2px;
+}
+
+.welcome h1 {
+  margin-top: 22px;
+  margin-bottom: 14px;
+  font-size: 48px;
+  line-height: 1.1;
+  letter-spacing: -2px;
+  font-weight: 750;
+}
+
+.welcome h1 span {
+  color: #6c63ff;
+}
+
+.welcome p {
+  max-width: 590px;
+  margin: 0 auto;
+  color: #747c8f;
+  font-size: 16px;
+  line-height: 1.7;
+}
+
+/* ==========================================
+   BASE CONTROLS
+========================================== */
+input, textarea, select {
+  border-radius: 14px !important;
+}
+
+[data-testid="stTextInput"] input,
+[data-testid="stTextArea"] textarea,
+[data-testid="stSelectbox"] div {
+  background: #ffffff;
+  border: 1px solid #d9e2f2;
+}
+
+.stButton > button {
+  border: 0;
+  border-radius: 999px;
+  background: linear-gradient(135deg, #4f7cff 0%, #6c63ff 100%);
+  color: white;
+  padding: 0.7rem 1.15rem;
+  font-weight: 600;
+  box-shadow: 0 12px 28px rgba(76, 102, 255, 0.22);
+}
+
+.stButton > button:hover {
+  filter: brightness(1.03);
+}
+
+h1, h2, h3, h4, h5, h6 {
+  letter-spacing: -0.03em;
+}
+
+p, li, label {
+  line-height: 1.6;
+}
