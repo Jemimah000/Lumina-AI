@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import io
+import re
+from collections import Counter
 from copy import deepcopy
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from pypdf import PdfReader
@@ -65,7 +68,9 @@ class StudyAssistant:
                     pages.append(text.strip())
             return "\n".join(pages)
         except Exception:
-            return ""
+            raw_text = pdf_bytes.decode("latin-1", errors="ignore")
+            text_fragments = re.findall(r"\(([^()]*)\)\s*Tj", raw_text)
+            return " ".join(text_fragments)
 
     @staticmethod
     def _now() -> str:
@@ -78,12 +83,28 @@ class StudyAssistant:
         if not material_name or not material_content:
             raise ValueError("Material name and content are required.")
 
+        sentences = [sentence.strip() for sentence in re.split(r"(?<=[.!?])\s+", material_content) if sentence.strip()]
+        short_notes = " ".join(sentences[:3])
+        if len(short_notes) > 520:
+            short_notes = short_notes[:517].rsplit(" ", 1)[0] + "..."
+        words = re.findall(r"[A-Za-z][A-Za-z'-]{3,}", material_content.lower())
+        stop_words = {
+            "about", "after", "also", "been", "being", "from", "have", "into",
+            "more", "most", "only", "other", "that", "their", "there", "these",
+            "they", "this", "using", "were", "which", "with", "your",
+        }
+        similar_words = [word for word, _ in Counter(words).most_common(12) if word not in stop_words][:6]
+
         material = {
             "id": len(self.materials) + 1,
             "name": material_name,
             "content": material_content,
             "source_type": source_type,
             "uploaded_at": self._now(),
+            "short_notes": short_notes,
+            "similar_words": similar_words,
+            "status": "Ready",
+            "uploaded": "Just now",
         }
         self.materials.append(material)
         return deepcopy(material)
@@ -123,6 +144,18 @@ class StudyAssistant:
                     "source_materials": source_materials,
                 }
 
+        for material in reversed(self.knowledge_base.get("materials", [])):
+            question_words = re.findall(r"[A-Za-z][A-Za-z'-]{3,}", normalized)
+            if any(word in material["text"].lower() for word in question_words):
+                return {
+                    "answer": material["short_notes"],
+                    "key_points": [
+                        {"title": "Short notes", "detail": material["short_notes"]},
+                        {"title": "Similar words", "detail": ", ".join(material["similar_words"])},
+                    ],
+                    "source_materials": [{"title": material["name"], "page": "Uploaded note", "time": "Now"}],
+                }
+
         return {
             "answer": (
                 "I could not find a direct match in your uploaded study material. "
@@ -136,6 +169,22 @@ class StudyAssistant:
             ],
             "source_materials": [],
         }
+
+    @staticmethod
+    def extract_text(file_name: str, file_bytes: bytes) -> str:
+        suffix = Path(file_name).suffix.lower()
+        if suffix in {".txt", ".md"}:
+            return file_bytes.decode("utf-8", errors="ignore")
+        if suffix == ".pdf":
+            return StudyAssistant.extract_pdf_text(file_bytes)
+        if suffix == ".docx":
+            try:
+                from docx import Document
+            except ImportError as error:
+                raise ValueError("DOCX support needs python-docx. Install it with: pip install python-docx") from error
+            import io
+            return "\n".join(paragraph.text for paragraph in Document(io.BytesIO(file_bytes)).paragraphs)
+        raise ValueError("Unsupported file type.")
 
     @staticmethod
     def _keywords_from_question(question: str) -> List[str]:
