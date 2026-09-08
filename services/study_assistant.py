@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import re
+from collections import Counter
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 
@@ -52,6 +55,18 @@ class StudyAssistant:
         if any(keyword in normalized for keyword in ["hash table", "hash", "collision", "bucket"]):
             return self.knowledge_base["hash_table"]
 
+        for material in reversed(self.knowledge_base.get("materials", [])):
+            question_words = re.findall(r"[A-Za-z][A-Za-z'-]{3,}", normalized)
+            if any(word in material["text"].lower() for word in question_words):
+                return {
+                    "answer": material["short_notes"],
+                    "key_points": [
+                        {"title": "Short notes", "detail": material["short_notes"]},
+                        {"title": "Similar words", "detail": ", ".join(material["similar_words"])},
+                    ],
+                    "source_materials": [{"title": material["name"], "page": "Uploaded note", "time": "Now"}],
+                }
+
         return {
             "answer": (
                 "I could not find a direct match in your uploaded study material. "
@@ -65,3 +80,47 @@ class StudyAssistant:
             ],
             "source_materials": [],
         }
+
+    def add_material(self, name: str, text: str) -> Dict[str, Any]:
+        """Create useful local study notes without requiring an external AI key."""
+        clean_text = re.sub(r"\s+", " ", text or "").strip()
+        if not clean_text:
+            raise ValueError("This file does not contain readable text.")
+
+        sentences = re.split(r"(?<=[.!?])\s+", clean_text)
+        sentences = [sentence.strip() for sentence in sentences if sentence.strip()]
+        short_notes = " ".join(sentences[:3])
+        if len(short_notes) > 520:
+            short_notes = short_notes[:517].rsplit(" ", 1)[0] + "..."
+
+        words = re.findall(r"[A-Za-z][A-Za-z'-]{3,}", clean_text.lower())
+        stop_words = {
+            "about", "after", "also", "been", "being", "from", "have", "into",
+            "more", "most", "only", "other", "that", "their", "there", "these",
+            "they", "this", "using", "were", "which", "with", "your",
+        }
+        similar_words = [word for word, _ in Counter(words).most_common(12) if word not in stop_words][:6]
+        material = {"name": name, "text": clean_text, "short_notes": short_notes, "similar_words": similar_words}
+        self.knowledge_base.setdefault("materials", []).append(material)
+        return material
+
+    @staticmethod
+    def extract_text(file_name: str, file_bytes: bytes) -> str:
+        suffix = Path(file_name).suffix.lower()
+        if suffix in {".txt", ".md"}:
+            return file_bytes.decode("utf-8", errors="ignore")
+        if suffix == ".pdf":
+            try:
+                from pypdf import PdfReader
+            except ImportError as error:
+                raise ValueError("PDF support needs the pypdf package. Install it with: pip install pypdf") from error
+            import io
+            return "\n".join(page.extract_text() or "" for page in PdfReader(io.BytesIO(file_bytes)).pages)
+        if suffix == ".docx":
+            try:
+                from docx import Document
+            except ImportError as error:
+                raise ValueError("DOCX support needs python-docx. Install it with: pip install python-docx") from error
+            import io
+            return "\n".join(paragraph.text for paragraph in Document(io.BytesIO(file_bytes)).paragraphs)
+        raise ValueError("Unsupported file type.")

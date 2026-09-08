@@ -1,4 +1,7 @@
 import streamlit as st
+from pathlib import Path
+
+from services.study_assistant import StudyAssistant
 
 st.set_page_config(
     page_title="Lumina AI",
@@ -11,6 +14,12 @@ with open("assets/style.css", encoding="utf-8") as css_file:
     st.markdown(f"<style>{css_file.read()}</style>", unsafe_allow_html=True)
 
 PAGE_LABELS = ["Dashboard", "Materials", "History", "Saved", "Upload", "Ask AI"]
+UPLOAD_DIR = Path("data/uploads")
+
+if "assistant" not in st.session_state:
+    st.session_state.assistant = StudyAssistant()
+if "materials" not in st.session_state:
+    st.session_state.materials = []
 
 
 def normalize_page(raw_page: str) -> str:
@@ -141,12 +150,50 @@ def render_dashboard() -> None:
 
 
 def render_materials() -> None:
-    st.markdown('<div class="page-title">Materials</div>', unsafe_allow_html=True)
     st.markdown(
-        '<p class="page-copy">Browse all uploaded notes and organize study packs by course.</p>',
+        """
+        <div class="materials-shell">
+          <aside class="materials-sidebar">
+            <div class="sidebar-brand"><span class="brand-mark">✦</span><div><b>Lumina</b><small>Your Study Partner</small></div></div>
+            <div class="sidebar-nav"><a>▦ &nbsp; Home</a><a class="selected">▣ &nbsp; My Library</a><a>▱ &nbsp; Chat History</a><a>♧ &nbsp; Bookmarks</a><a>⚙ &nbsp; Settings</a></div>
+            <div class="sidebar-footer"><a>ⓘ &nbsp; Help</a><a>♙ &nbsp; Privacy</a></div>
+          </aside>
+          <section class="materials-main">
+            <div class="materials-heading"><div><h1>My Study Materials 📚</h1><p>Manage your uploaded notes, textbooks, and resources. Let Lumina help you study smarter.</p></div><a class="icon-upload" href="?page=Upload">↥</a></div>
+        """,
         unsafe_allow_html=True,
     )
-    st.info("No materials yet. Go to Upload to add your first file.")
+    tab_col, search_col = st.columns([1.4, 1], gap="medium")
+    with tab_col:
+        selected_tab = st.radio("Material filter", ["All", "Recent", "Favorites"], horizontal=True, label_visibility="collapsed")
+    with search_col:
+        search_term = st.text_input("Search materials", placeholder="⌕  Search materials...", label_visibility="collapsed")
+
+    materials = st.session_state.materials
+    if search_term.strip():
+        query = search_term.lower().strip()
+        materials = [item for item in materials if query in item["name"].lower() or query in item["text"].lower()]
+    if selected_tab == "Recent":
+        materials = materials[-3:]
+    elif selected_tab == "Favorites":
+        materials = [item for item in materials if item.get("favorite")]
+
+    st.markdown('<div class="material-grid">', unsafe_allow_html=True)
+    if not materials:
+        st.markdown('<div class="empty-materials">No materials yet. Upload your first note to generate short notes and similar words.</div>', unsafe_allow_html=True)
+    for index, material in enumerate(materials):
+        file_type = Path(material["name"]).suffix.replace(".", "").upper() or "NOTE"
+        status = material.get("status", "Ready")
+        st.markdown(
+            f'''<div class="material-card"><div class="file-icon">▣</div><span class="status-badge">◉ {status}</span><h3>{material["name"]}</h3><p class="file-meta">▧ {file_type} &nbsp; ◷ {material.get("uploaded", "Just now")}</p><div class="card-actions"><form><button formaction="?page=Ask AI" class="ask-card-button">✦ Ask AI</button></form><span class="open-card">↗</span></div></div>''',
+            unsafe_allow_html=True,
+        )
+        with st.expander(f"View notes: {material['name']}", expanded=False):
+            st.markdown("**Short notes**")
+            st.write(material["short_notes"])
+            st.markdown("**Similar words**")
+            st.write(", ".join(material["similar_words"]) or "No related terms found")
+    st.markdown('</div></section></div>', unsafe_allow_html=True)
 
 
 def render_history() -> None:
@@ -168,12 +215,34 @@ def render_saved() -> None:
 
 
 def render_upload() -> None:
-    st.markdown('<div class="page-title">Upload Materials</div>', unsafe_allow_html=True)
+    st.markdown('<div class="page-title">Upload PDF Notes</div>', unsafe_allow_html=True)
     st.markdown(
-        '<p class="page-copy">Add PDFs, notes, and study documents to build your personal knowledge base.</p>',
+        '<p class="page-copy">Choose a PDF from your computer. Lumina will save it, create short notes, and find similar words.</p>',
         unsafe_allow_html=True,
     )
-    st.file_uploader("Choose your study files", type=["pdf", "txt", "md", "docx"], accept_multiple_files=True)
+    uploaded_files = st.file_uploader(
+        "Select PDF files from your computer",
+        type=["pdf", "txt", "md", "docx"],
+        accept_multiple_files=True,
+        help="You can select one or more PDF files from your computer.",
+    )
+    if uploaded_files:
+        st.caption(f"Selected {len(uploaded_files)} file(s): " + ", ".join(file.name for file in uploaded_files))
+    if uploaded_files and st.button("Upload and create notes"):
+        UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+        for uploaded_file in uploaded_files:
+            try:
+                file_bytes = uploaded_file.getvalue()
+                text = st.session_state.assistant.extract_text(uploaded_file.name, file_bytes)
+                material = st.session_state.assistant.add_material(uploaded_file.name, text)
+                material["uploaded"] = "Just now"
+                material["status"] = "Ready"
+                if not any(item["name"] == material["name"] for item in st.session_state.materials):
+                    st.session_state.materials.append(material)
+                (UPLOAD_DIR / uploaded_file.name).write_bytes(file_bytes)
+                st.success(f"{uploaded_file.name} processed successfully.")
+            except ValueError as error:
+                st.error(f"{uploaded_file.name}: {error}")
 
 
 def render_ask_ai() -> None:
@@ -185,7 +254,13 @@ def render_ask_ai() -> None:
     question = st.text_area("What would you like to understand today?", placeholder="Explain photosynthesis in simple steps")
     if st.button("Generate Answer"):
         if question.strip():
-            st.success("Your AI answer would appear here after backend integration.")
+            result = st.session_state.assistant.answer_question(question)
+            st.success(result["answer"])
+            if result["key_points"]:
+                for point in result["key_points"]:
+                    st.markdown(f"**{point['title']}**: {point['detail']}")
+            if result["source_materials"]:
+                st.caption(f"Source: {result['source_materials'][0]['title']}")
         else:
             st.warning("Please enter a question first.")
 
