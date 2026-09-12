@@ -52,20 +52,55 @@ class StudyAssistant:
         return (text or "").strip().lower()
 
     @staticmethod
-    def extract_pdf_text(pdf_bytes: bytes) -> str:
+    def extract_pdf_page_records(pdf_bytes: bytes, source: Optional[str] = None) -> List[Dict[str, Any]]:
+        """Extract a PDF into page-aware records.
+
+        Returns a list where each item contains the page number, extracted text,
+        and the optional source filename. Empty pages and pages without text are
+        skipped. Invalid or empty PDFs return an empty list instead of fake text.
+        """
         if not pdf_bytes:
-            return ""
+            return []
 
         try:
             reader = PdfReader(io.BytesIO(pdf_bytes))
-            pages = []
-            for page in reader.pages:
-                text = page.extract_text() or ""
-                if text.strip():
-                    pages.append(text.strip())
-            return "\n".join(pages)
+            if not reader.pages:
+                return []
+
+            records: List[Dict[str, Any]] = []
+            for page_number, page in enumerate(reader.pages, start=1):
+                try:
+                    text = page.extract_text()
+                except Exception:
+                    text = None
+
+                if text is None:
+                    continue
+
+                cleaned_text = (text or "").strip()
+                if not cleaned_text:
+                    continue
+
+                records.append({
+                    "page": page_number,
+                    "text": cleaned_text,
+                    "source": source or "",
+                })
+
+            return records
         except Exception:
-            return ""
+            return []
+
+    @staticmethod
+    def extract_pdf_text(pdf_bytes: bytes, source: Optional[str] = None) -> str:
+        """Backwards-compatible convenience adapter.
+
+        Preserves the public flattened-string behavior by joining all
+        record.text values across pages with newlines. The page-aware records
+        remain available via extract_pdf_page_records for future chunking.
+        """
+        records = StudyAssistant.extract_pdf_page_records(pdf_bytes, source)
+        return "\n".join(record["text"] for record in records)
 
     @staticmethod
     def _now() -> str:

@@ -1,6 +1,77 @@
 from services.study_assistant import StudyAssistant
 
 
+def build_pdf_from_page_texts(page_texts):
+    """Create a tiny synthetic PDF with one encoded content stream per page.
+
+    Page 1 and page 2 carry visible text; page 3 is intentionally empty and
+    therefore should not create a page record from the extraction layer.
+    """
+    object_chunks = []
+
+    # Catalog and pages tree.
+    object_chunks.append(b"1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n")
+    object_chunks.append(b"2 0 obj\n<< /Type /Pages /Kids [3 0 R 5 0 R 7 0 R] /Count 3 >>\nendobj\n")
+
+    # Shared font resource.
+    object_chunks.append(b"8 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>\nendobj\n")
+
+    # Page 1 with content stream object 4.
+    stream_text = (
+        "BT\n"
+        "/F1 12 Tf\n"
+        "50 100 Td\n"
+        f"({page_texts[0]}) Tj\n"
+        "ET\n"
+    )
+    stream_bytes = stream_text.encode("latin-1")
+    object_chunks.append(
+        b"3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 300 200] /Contents 4 0 R /Resources << /Font << /F1 8 0 R >> >> >>\nendobj\n"
+    )
+    object_chunks.append(
+        f"4 0 obj\n<< /Length {len(stream_bytes)} >>\nstream\n{stream_text}\nendstream\nendobj\n".encode("latin-1")
+    )
+
+    # Page 2 with content stream object 6.
+    stream_text = (
+        "BT\n"
+        "/F1 12 Tf\n"
+        "50 100 Td\n"
+        f"({page_texts[1]}) Tj\n"
+        "ET\n"
+    )
+    stream_bytes = stream_text.encode("latin-1")
+    object_chunks.append(
+        b"5 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 300 200] /Contents 6 0 R /Resources << /Font << /F1 8 0 R >> >> >>\nendobj\n"
+    )
+    object_chunks.append(
+        f"6 0 obj\n<< /Length {len(stream_bytes)} >>\nstream\n{stream_text}\nendstream\nendobj\n".encode("latin-1")
+    )
+
+    # Page 3 intentionally blank page with no content stream, and therefore no extraction content.
+    object_chunks.append(
+        b"7 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 300 200] /Resources << /Font << /F1 8 0 R >> >> >>\nendobj\n"
+    )
+
+    pdf_bytes = bytearray(b"%PDF-1.4\n")
+    offsets = [0]
+    for chunk in object_chunks:
+        offsets.append(len(pdf_bytes))
+        pdf_bytes.extend(chunk)
+
+    xref_start = len(pdf_bytes)
+    pdf_bytes.extend(f"xref\n0 {len(object_chunks) + 1}\n".encode("ascii"))
+    pdf_bytes.extend(b"0000000000 65535 f \n")
+    for offset in offsets[1:]:
+        pdf_bytes.extend(f"{offset:010d} 00000 n \n".encode("ascii"))
+    pdf_bytes.extend(
+        f"trailer\n<< /Size {len(object_chunks) + 1} /Root 1 0 R >>\n"
+        f"startxref\n{xref_start}\n%%EOF\n".encode("ascii")
+    )
+
+    return bytes(pdf_bytes)
+
+
 def test_study_assistant_extracts_text_from_pdf_material():
     text = "Photosynthesis converts sunlight into chemical energy for plants."
     stream_text = (
@@ -38,6 +109,27 @@ def test_study_assistant_extracts_text_from_pdf_material():
 
     assert "photosynthesis" in extracted.lower()
     assert "chemical energy" in extracted.lower()
+
+
+def test_extract_pdf_page_records_preserves_pages_and_safely_skips_empty_pages():
+    pdf_bytes = build_pdf_from_page_texts([
+        "Introduction to Formal Languages",
+        "A grammar is a set of production rules.",
+        "",
+    ])
+
+    records = StudyAssistant.extract_pdf_page_records(pdf_bytes, "Formal Languages Notes.pdf")
+
+    assert len(records) == 2
+    assert [record["page"] for record in records] == [1, 2]
+    assert records[0]["text"] == "Introduction to Formal Languages"
+    assert records[1]["text"] == "A grammar is a set of production rules."
+    assert all(record["source"] == "Formal Languages Notes.pdf" for record in records)
+
+
+def test_extract_pdf_page_records_handles_invalid_or_empty_pdf_input_safely():
+    assert StudyAssistant.extract_pdf_page_records(b"", "Example.pdf") == []
+    assert StudyAssistant.extract_pdf_page_records(b"not a valid pdf", "Example.pdf") == []
 
 
 def test_study_assistant_returns_structured_answer():
