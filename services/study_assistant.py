@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from langchain_text_splitters import RecursiveCharacterTextSplitter
 from pypdf import PdfReader
 
 
@@ -117,6 +118,58 @@ class StudyAssistant:
         """
         records = StudyAssistant.extract_pdf_page_records(pdf_bytes, source)
         return "\n".join(record["text"] for record in records)
+
+    @staticmethod
+    def chunk_page_records(page_records: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Split page-aware PDF extraction records into page-preserving chunks.
+
+        Each input record is expected to carry page, text, and source metadata
+        from the PDF extraction step. This method chunks each page independently
+        and carries the original page number and source filename forward for each
+        returned chunk. It never invents metadata and safely skips records that
+        carry missing, empty, or whitespace-only text.
+        """
+        if not page_records:
+            return []
+
+        splitter = RecursiveCharacterTextSplitter(
+            chunk_size=1000,
+            chunk_overlap=150,
+        )
+
+        chunks: List[Dict[str, Any]] = []
+        for record in page_records:
+            if not isinstance(record, dict):
+                continue
+
+            page = record.get("page")
+            if page is None:
+                continue
+
+            text = record.get("text") or ""
+            if not isinstance(text, str):
+                continue
+
+            if not text.strip():
+                continue
+
+            source = record.get("source") or ""
+            if not isinstance(source, str):
+                source = str(source or "")
+
+            page_texts = splitter.split_text(text)
+            for chunk_text in page_texts:
+                if not chunk_text.strip():
+                    continue
+                chunks.append(
+                    {
+                        "text": chunk_text,
+                        "page": page,
+                        "source": source,
+                    }
+                )
+
+        return chunks
 
     @staticmethod
     def _now() -> str:

@@ -155,3 +155,37 @@ def test_study_assistant_tracks_uploads_history_and_saved_answers():
 
     assert len(assistant.get_history()) == 1
     assert len(assistant.get_saved_answers()) == 1
+
+
+def test_chunk_page_records_splits_long_pages_and_preserves_metadata():
+    page_records = [
+        {
+            "page": 1,
+            "text": "A " * 1200,
+            "source": "sample.pdf",
+        },
+        {
+            "page": 2,
+            "text": "B " * 1200,
+            "source": "sample.pdf",
+        },
+    ]
+
+    chunks = StudyAssistant.chunk_page_records(page_records)
+
+    assert len(chunks) > 1
+    assert all(chunk["text"].strip() for chunk in chunks)
+    assert all(chunk["source"] == "sample.pdf" for chunk in chunks)
+    assert all(chunk["page"] == 1 for chunk in chunks if chunk["page"] == 1)
+    assert all(chunk["page"] == 2 for chunk in chunks if chunk["page"] == 2)
+    assert {chunk["page"] for chunk in chunks} == {1, 2}
+
+
+def test_chunk_page_records_handles_empty_and_whitespace_inputs_safely():
+    assert StudyAssistant.chunk_page_records([]) == []
+    assert StudyAssistant.chunk_page_records([
+        {"page": 1, "text": "   ", "source": "sample.pdf"},
+    ]) == []
+    assert StudyAssistant.chunk_page_records([
+        {"page": 1, "text": "", "source": "sample.pdf"},
+    ]) == []
