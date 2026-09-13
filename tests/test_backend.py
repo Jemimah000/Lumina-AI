@@ -1,5 +1,7 @@
 from services.study_assistant import StudyAssistant
 
+import numpy as np
+
 
 class FakeEmbeddingModel:
     def embed_documents(self, texts):
@@ -248,3 +250,67 @@ def test_embed_chunks_real_model_smoke_check():
     assert isinstance(results[0]["embedding"], list)
     assert len(results[0]["embedding"]) > 1
     assert all(isinstance(value, float) for value in results[0]["embedding"])
+
+
+def test_build_faiss_index_and_search_return_metadata_and_top_k_results():
+    assistant = StudyAssistant()
+
+    def vector_for(text_index):
+        arr = np.zeros(384, dtype="float32")
+        arr[text_index % 384] = 1.0
+        return arr.astype(float).tolist()
+
+    embedded_chunks = [
+        {
+            "text": "Photosynthesis turns light energy into chemical energy.",
+            "page": 1,
+            "source": "bio.pdf",
+            "embedding": vector_for(0),
+        },
+        {
+            "text": "Mitochondria power cellular respiration.",
+            "page": 2,
+            "source": "bio.pdf",
+            "embedding": vector_for(1),
+        },
+    ]
+
+    payload = assistant.build_faiss_index(embedded_chunks)
+    index = payload["index"]
+    metadata = payload["metadata"]
+
+    assert index is not None
+    assert index.ntotal == 2
+    assert index.d == 384
+    assert len(metadata) == 2
+    assert [item["text"] for item in metadata] == [
+        "Photosynthesis turns light energy into chemical energy.",
+        "Mitochondria power cellular respiration.",
+    ]
+
+    query = vector_for(0)
+    results = assistant.search_faiss(query, index, metadata, k=1)
+
+    assert len(results) == 1
+    assert results[0]["text"] == "Photosynthesis turns light energy into chemical energy."
+    assert results[0]["page"] == 1
+    assert results[0]["source"] == "bio.pdf"
+    assert "similarity" in results[0]
+
+
+def test_faiss_helpers_handle_empty_and_invalid_inputs_safely():
+    assistant = StudyAssistant()
+
+    assert assistant.build_faiss_index([]) == {"index": None, "metadata": []}
+    assert assistant.build_faiss_index([
+        {"text": "   ", "page": 1, "source": "bio.pdf", "embedding": []},
+    ]) == {"index": None, "metadata": []}
+
+    empty_index_payload = assistant.build_faiss_index([
+        {"text": "Missing embeddings safely", "page": 1, "source": "bio.pdf", "embedding": None},
+    ])
+    assert empty_index_payload == {"index": None, "metadata": []}
+
+    query = [1.0, 2.0, 3.0]
+    assert assistant.search_faiss(query, None, [], k=3) == []
+    assert assistant.search_faiss([], None, [], k=3) == []

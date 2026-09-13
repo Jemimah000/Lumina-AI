@@ -235,6 +235,198 @@ class StudyAssistant:
         return results
 
     @staticmethod
+    def build_faiss_index(embedded_chunks: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """Build an in-memory FAISS index from embedded chunk records.
+
+        Accepts the shape returned by embed_chunks(), keeps the exact metadata
+        fields needed for retrieval, and returns a dictionary with an index and
+        the metadata list in the same vector order. FAISS stores vectors only,
+        so the metadata list is the mapping from vector row to original chunk.
+        Empty or malformed input is handled safely and returns an empty index
+        mapping without crashing.
+        """
+        if not embedded_chunks:
+            return {"index": None, "metadata": []}
+
+        try:
+            import faiss
+            import numpy as np
+        except Exception:
+            return {"index": None, "metadata": []}
+
+        valid_chunks: List[Dict[str, Any]] = []
+        for chunk in embedded_chunks:
+            if not isinstance(chunk, dict):
+                continue
+
+            text = chunk.get("text")
+            if not isinstance(text, str) or not text.strip():
+                continue
+
+            page = chunk.get("page")
+            source = chunk.get("source") or ""
+            if not isinstance(source, str):
+                source = str(source or "")
+
+            embedding = chunk.get("embedding")
+            if not isinstance(embedding, (list, tuple)):
+                continue
+
+            try:
+                vectors = [float(value) for value in embedding]
+            except Exception:
+                continue
+
+            if not vectors:
+                continue
+
+            valid_chunks.append(
+                {
+                    "text": text.strip(),
+                    "page": page,
+                    "source": source,
+                    "embedding": vectors,
+                }
+            )
+
+        if not valid_chunks:
+            return {"index": None, "metadata": []}
+
+        dim = len(valid_chunks[0]["embedding"])
+        vectors = []
+        metadata = []
+
+        for chunk in valid_chunks:
+            emb = chunk.get("embedding") or []
+            if len(emb) != dim:
+                continue
+
+            try:
+                arr = np.asarray(emb, dtype="float32")
+                norm = float(np.linalg.norm(arr))
+                if norm <= 0:
+                    continue
+                arr = arr / norm
+            except Exception:
+                continue
+
+            vectors.append(arr)
+            metadata.append(
+                {
+                    "text": chunk["text"],
+                    "page": chunk["page"],
+                    "source": chunk["source"],
+                }
+            )
+
+        if not vectors:
+            return {"index": None, "metadata": []}
+
+        faiss_vectors = np.vstack(vectors).astype("float32")
+        index = faiss.IndexFlatIP(dim)
+        index.add(faiss_vectors)
+
+        return {"index": index, "metadata": metadata}
+
+    @staticmethod
+    def search_faiss(
+        query_embedding: List[float],
+        index,
+        metadata: List[Dict[str, Any]],
+        k: int = 3,
+    ) -> List[Dict[str, Any]]:
+        """Return top-k FAISS similarity results with metadata preserved.
+
+        The stored chunk vectors and query vectors are normalized before cosine-
+        equivalent inner-product search in a FAISS IndexFlatIP index.
+        """
+        if index is None or not metadata:
+            return []
+
+        if k <= 0:
+            return []
+
+        if not isinstance(query_embedding, (list, tuple)):
+            return []
+
+        try:
+            import faiss
+            import numpy as np
+        except Exception:
+            return []
+
+        try:
+            query_vector = [float(value) for value in query_embedding]
+            if not query_vector:
+                return []
+
+            query_array = np.asarray(query_vector, dtype="float32")
+            query_norm = float(np.linalg.norm(query_array))
+            if query_norm <= 0:
+                return []
+
+            query_array = query_array / query_norm
+            if query_array.shape[0] != index.d:
+                return []
+        except Exception:
+            return []
+
+        if index.ntotal == 0:
+            return []
+
+        k_safe = min(k, int(index.ntotal))
+        if k_safe <= 0:
+            return []
+
+        distances, indices = index.search(np.asarray([query_array], dtype="float32"), k_safe)
+
+        results: List[Dict[str, Any]] = []
+        for distance, position in zip(distances[0], indices[0]):
+            if position < 0:
+                continue
+            if position >= len(metadata):
+                continue
+
+            item = dict(metadata[position])
+            item["similarity"] = float(distance)
+            results.append(item)
+
+        return results
+
+    def retrieve_relevant_chunks(
+        self,
+        query_text: str,
+        index,
+        metadata: List[Dict[str, Any]],
+        k: int = 3,
+    ) -> List[Dict[str, Any]]:
+        """Retrieval-only helper: query text -> HuggingFace embedding -> FAISS search.
+
+        This method intentionally stops at similarity retrieval and does not
+        generate an answer, call Gemini, or add UI logic.
+        """
+        if not isinstance(query_text, str):
+            return []
+
+        stripped = query_text.strip()
+        if not stripped:
+            return []
+
+        if index is None or not metadata:
+            return []
+
+        try:
+            model = self._get_embedding_model()
+            query_embedding = model.embed_query(stripped)
+        except Exception:
+            return []
+
+        if not isinstance(query_embedding, list) or not query_embedding:
+            return []
+
+        return self.search_faiss(query_embedding, index, metadata, k)
+
+    @staticmethod
     def _now() -> str:
         return datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
 
