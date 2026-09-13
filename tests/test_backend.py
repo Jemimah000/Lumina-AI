@@ -1,6 +1,11 @@
 from services.study_assistant import StudyAssistant
 
 
+class FakeEmbeddingModel:
+    def embed_documents(self, texts):
+        return [[4.0, 5.0, 6.0] for _ in texts]
+
+
 def build_pdf_from_page_texts(page_texts):
     """Create a tiny synthetic PDF with one encoded content stream per page.
 
@@ -189,3 +194,57 @@ def test_chunk_page_records_handles_empty_and_whitespace_inputs_safely():
     assert StudyAssistant.chunk_page_records([
         {"page": 1, "text": "", "source": "sample.pdf"},
     ]) == []
+
+
+def test_embed_chunks_produces_numeric_embeddings_and_preserves_metadata():
+    assistant = StudyAssistant()
+    assistant.embedding_model = FakeEmbeddingModel()
+
+    chunks = [
+        {"text": "Photosynthesis stores energy.", "page": 1, "source": "bio.pdf"},
+        {"text": "Cells use ATP for reactions.", "page": 2, "source": "bio.pdf"},
+    ]
+
+    embedded = assistant.embed_chunks(chunks)
+
+    assert len(embedded) == 2
+    assert [item["text"] for item in embedded] == [chunk["text"] for chunk in chunks]
+    assert [item["page"] for item in embedded] == [1, 2]
+    assert [item["source"] for item in embedded] == ["bio.pdf", "bio.pdf"]
+    assert all(isinstance(item["embedding"], list) for item in embedded)
+    assert all(all(isinstance(value, (int, float)) for value in item["embedding"]) for item in embedded)
+
+
+def test_embed_chunks_handles_empty_and_invalid_inputs_safely():
+    assistant = StudyAssistant()
+    assistant.embedding_model = FakeEmbeddingModel()
+
+    assert assistant.embed_chunks([]) == []
+    assert assistant.embed_chunks([
+        {"text": "   ", "page": 1, "source": "bio.pdf"},
+        {"text": "", "page": 2, "source": "bio.pdf"},
+        {"text": "Valid text", "page": 3, "source": "bio.pdf"},
+    ]) == [
+        {
+            "text": "Valid text",
+            "page": 3,
+            "source": "bio.pdf",
+            "embedding": [4.0, 5.0, 6.0],
+        }
+    ]
+
+
+def test_embed_chunks_real_model_smoke_check():
+    assistant = StudyAssistant()
+
+    results = assistant.embed_chunks([
+        {"text": "The mitochondria power the cell.", "page": 1, "source": "biology.pdf"},
+    ])
+
+    assert len(results) == 1
+    assert results[0]["text"] == "The mitochondria power the cell."
+    assert results[0]["page"] == 1
+    assert results[0]["source"] == "biology.pdf"
+    assert isinstance(results[0]["embedding"], list)
+    assert len(results[0]["embedding"]) > 1
+    assert all(isinstance(value, float) for value in results[0]["embedding"])
