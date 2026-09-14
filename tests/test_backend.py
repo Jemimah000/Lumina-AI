@@ -1,3 +1,5 @@
+import pytest
+
 from services.study_assistant import StudyAssistant
 
 import numpy as np
@@ -296,6 +298,80 @@ def test_build_faiss_index_and_search_return_metadata_and_top_k_results():
     assert results[0]["page"] == 1
     assert results[0]["source"] == "bio.pdf"
     assert "similarity" in results[0]
+
+
+def test_generate_answer_returns_mocked_grounded_answer_and_includes_requested_context(monkeypatch):
+    assistant = StudyAssistant()
+    monkeypatch.setenv("GEMINI_API_KEY", "test-key")
+
+    from types import SimpleNamespace
+
+    captured = {}
+
+    class FakeModels:
+        def generate_content(self, model, contents):
+            captured["model"] = model
+            captured["contents"] = contents
+            assert "What is photosynthesis?" in contents
+            assert "Photosynthesis turns light energy into chemical energy." in contents
+            assert "general knowledge" in contents.lower()
+            assert "I couldn't find this information in the study material." in contents
+            assert "study material is the only source of truth" in contents.lower()
+            return SimpleNamespace(text="Photosynthesis turns light energy into chemical energy.")
+
+    class FakeClient:
+        def __init__(self, api_key):
+            self.api_key = api_key
+            self.models = FakeModels()
+
+    try:
+        from google import genai
+    except Exception:
+        genai = None
+
+    if genai is not None:
+        monkeypatch.setattr(genai, "Client", FakeClient)
+
+    answer = assistant.generate_answer(
+        "What is photosynthesis?",
+        [
+            {"text": "Photosynthesis turns light energy into chemical energy.", "page": 1, "source": "bio.pdf"},
+        ],
+    )
+
+    assert answer == "Photosynthesis turns light energy into chemical energy."
+    assert captured["model"] == "gemini-3.6-flash"
+    assert "What is photosynthesis?" in captured["contents"]
+    assert "Photosynthesis turns light energy into chemical energy." in captured["contents"]
+
+
+def test_generate_answer_returns_fallback_for_empty_or_invalid_retrieval(monkeypatch):
+    assistant = StudyAssistant()
+    monkeypatch.setenv("GEMINI_API_KEY", "test-key")
+
+    class FailClient:
+        def __init__(self, api_key):
+            raise AssertionError("Gemini client should not be called when retrieval is empty")
+
+    try:
+        from google import genai
+    except Exception:
+        genai = None
+
+    if genai is not None:
+        monkeypatch.setattr(genai, "Client", FailClient)
+
+    fallback = "I couldn't find this information in the study material."
+    assert assistant.generate_answer("What is photosynthesis?", []) == fallback
+    assert assistant.generate_answer("What is photosynthesis?", [{"text": "   ", "page": 1, "source": "bio.pdf"}]) == fallback
+
+
+def test_generate_answer_requires_gemini_api_key(monkeypatch):
+    assistant = StudyAssistant()
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+
+    with pytest.raises(ValueError, match="GEMINI_API_KEY is not configured"):
+        assistant.generate_answer("What is photosynthesis?", [{"text": "Photosynthesis turns light energy into chemical energy.", "page": 1, "source": "bio.pdf"}])
 
 
 def test_faiss_helpers_handle_empty_and_invalid_inputs_safely():
