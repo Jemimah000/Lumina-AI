@@ -6,3 +6,5 @@ langchain-huggingface>=0.3.0
 sentence-transformers>=5.0.0
 faiss-cpu
 python-docx>=1.2.0
+google-genai>=1.0.0
+python-dotenv>=1.0.0
