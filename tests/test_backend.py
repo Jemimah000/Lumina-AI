@@ -12,6 +12,9 @@ class FakeEmbeddingModel:
     def embed_documents(self, texts):
         return [[4.0, 5.0, 6.0] for _ in texts]
 
+    def embed_query(self, text):
+        return [4.0, 5.0, 6.0]
+
 
 def build_pdf_from_page_texts(page_texts):
     """Create a tiny synthetic PDF with one encoded content stream per page.
@@ -144,22 +147,30 @@ def test_extract_pdf_page_records_handles_invalid_or_empty_pdf_input_safely():
     assert StudyAssistant.extract_pdf_page_records(b"not a valid pdf", "Example.pdf") == []
 
 
-def test_study_assistant_returns_structured_answer():
-    assistant = StudyAssistant()
-    result = assistant.answer_question("How does a hash table handle collisions?")
+def test_answer_question_uses_faiss_retrieval_not_legacy_knowledge_base(monkeypatch, tmp_path):
+    assistant = StudyAssistant(
+        knowledge_base={"hash_table": {"answer": "legacy answer"}},
+        storage_root=tmp_path / "data",
+    )
+    assistant.embedding_model = FakeEmbeddingModel()
+    rag = assistant.build_faiss_index([{
+        "text": "The uploaded notes define a stack as last in, first out.",
+        "page": 2, "source": "notes.pdf", "embedding": [4.0, 5.0, 6.0],
+    }])
+    assistant.faiss_index, assistant.faiss_metadata = rag["index"], rag["metadata"]
+    monkeypatch.setattr(assistant, "generate_answer", lambda question, chunks: "Grounded answer")
 
-    assert "hash" in result["answer"].lower()
-    assert isinstance(result["key_points"], list) and result["key_points"]
-    assert isinstance(result["source_materials"], list)
+    result = assistant.answer_question("What is a stack?")
+
+    assert result["answer"] == "Grounded answer"
+    assert result["source_materials"] == [{"title": "notes.pdf", "page": 2}]
 
 
-def test_study_assistant_tracks_uploads_history_and_saved_answers():
-    assistant = StudyAssistant()
-    assistant.add_material("Biology Notes", "Photosynthesis converts sunlight into chemical energy.")
+def test_study_assistant_tracks_uploads_history_and_saved_answers(tmp_path):
+    assistant = StudyAssistant(storage_root=tmp_path / "data")
+    material = assistant.add_material("Biology Notes", "Photosynthesis converts sunlight into chemical energy.")
+    answer = {"answer": "Grounded answer", "source_materials": [{"title": material["name"], "page": 1}]}
 
-    answer = assistant.answer_question("What is photosynthesis?")
-
-    assert "photosynthesis" in answer["answer"].lower()
     assert len(assistant.get_materials()) == 1
 
     assistant.add_history("What is photosynthesis?", answer)
@@ -167,6 +178,36 @@ def test_study_assistant_tracks_uploads_history_and_saved_answers():
 
     assert len(assistant.get_history()) == 1
     assert len(assistant.get_saved_answers()) == 1
+
+
+def test_process_pdf_upload_runs_full_pipeline_and_saves_to_uploads(tmp_path):
+    assistant = StudyAssistant(storage_root=tmp_path / "data")
+    assistant.embedding_model = FakeEmbeddingModel()
+    pdf_bytes = build_pdf_from_page_texts([
+        "React is a library for building user interfaces.",
+        "Components are reusable pieces of a user interface.",
+        "",
+    ])
+
+    result = assistant.process_pdf_upload("React Notes.pdf", pdf_bytes)
+
+    assert result["index"] is assistant.faiss_index
+    assert result["index"].ntotal == 2
+    assert {item["page"] for item in result["metadata"]} == {1, 2}
+    assert all(item["source"] == "React Notes.pdf" for item in result["metadata"])
+    materials = assistant.get_materials()
+    assert len(materials) == 1 and materials[0]["status"] == "Ready"
+    assert Path(materials[0]["file_path"]).parent == tmp_path / "data" / "uploads"
+
+
+def test_answer_question_returns_exact_fallback_without_relevant_chunks(tmp_path):
+    assistant = StudyAssistant(storage_root=tmp_path / "data")
+    assistant.embedding_model = FakeEmbeddingModel()
+    assert assistant.answer_question("What is unrelated?") == {
+        "answer": "I couldn't find this information in the study material.",
+        "key_points": [],
+        "source_materials": [],
+    }
 
 
 def test_add_material_preserves_text_alias_for_ui_materials_list():
