@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import hashlib
 import io
+import json
 import os
 import re
+import time
 from collections import Counter
 from copy import deepcopy
 from datetime import datetime, timezone
@@ -19,8 +22,19 @@ load_dotenv()
 class StudyAssistant:
     """Backend service for a study assistant that answers questions from uploaded material."""
 
-    def __init__(self, knowledge_base: Optional[Dict[str, Any]] = None) -> None:
+    def __init__(
+        self,
+        knowledge_base: Optional[Dict[str, Any]] = None,
+        storage_root: Optional[Path | str] = None,
+    ) -> None:
         self.embedding_model = None
+        self.storage_root = Path(storage_root) if storage_root is not None else Path("data")
+        self.upload_dir = self.storage_root / "uploads"
+        self.materials_dir = self.storage_root / "materials"
+        self.materials_file = self.materials_dir / "materials.json"
+        self.upload_dir.mkdir(parents=True, exist_ok=True)
+        self.materials_dir.mkdir(parents=True, exist_ok=True)
+
         self.knowledge_base = knowledge_base or {
             "hash_table": {
                 "answer": (
@@ -56,6 +70,13 @@ class StudyAssistant:
         self.materials: List[Dict[str, Any]] = []
         self.history: List[Dict[str, Any]] = []
         self.saved_answers: List[Dict[str, Any]] = []
+        self.faiss_index = None
+        self.faiss_metadata: List[Dict[str, Any]] = []
+
+        # Important: the persisted file-backed material list is a true source
+        # of truth for a new assistant instance; streamlit session state is only
+        # a cached view in the UI.
+        self._load_materials_from_disk()
 
     @staticmethod
     def _normalize(text: str) -> str:
@@ -178,12 +199,73 @@ class StudyAssistant:
 
     def _get_embedding_model(self):
         """Create a single reusable HuggingFace embeddings model instance."""
-        if self.embedding_model is None:
+        if self.embedding_model is not None:
+            return self.embedding_model
+
+        try:
             from langchain_huggingface import HuggingFaceEmbeddings
 
             self.embedding_model = HuggingFaceEmbeddings(
-                model_name="sentence-transformers/all-MiniLM-L6-v2"
+                model_name="sentence-transformers/all-MiniLM-L6-v2",
+                model_kwargs={"device": "cpu"},
             )
+        except Exception as error:
+            message = str(error).lower()
+            if any(
+                marker in message
+                for marker in (
+                    "timeout",
+                    "timed out",
+                    "connection",
+                    "connecterror",
+                    "huggingface",
+                    "hf_hub",
+                    "proxy",
+                    "dns",
+                    "network",
+                )
+            ):
+                category = "Hugging Face download/network failure"
+                action = "check network access to Hugging Face and retry the model download"
+            elif any(
+                marker in message
+                for marker in (
+                    "corrupt",
+                    "incomplete",
+                    "unexpected eof",
+                    "safetensors",
+                    "invalid load key",
+                    "missing file",
+                    "no such file",
+                )
+            ):
+                category = "corrupted/incomplete local model cache"
+                action = "remove the cached all-MiniLM-L6-v2 files and retry the download"
+            elif any(
+                marker in message
+                for marker in (
+                    "meta tensor",
+                    "to_empty",
+                    "sentence_transformers",
+                    "sentence-transformers",
+                    "SentenceTransformer",
+                    "pytorch",
+                    "torch",
+                    "transformers",
+                )
+            ):
+                category = "PyTorch/SentenceTransformer compatibility problem"
+                action = "verify compatible torch, transformers, and sentence-transformers versions"
+            else:
+                category = "another embedding dependency error"
+                action = "verify the embedding dependencies and model installation"
+
+            raise RuntimeError(
+                "Could not load the CPU embedding model "
+                "sentence-transformers/all-MiniLM-L6-v2. "
+                f"Diagnostic: {category}. Please {action}. "
+                f"Original error: {error}"
+            ) from error
 
         return self.embedding_model
 
@@ -434,11 +516,59 @@ class StudyAssistant:
     def _now() -> str:
         return datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
 
+    def _load_materials_from_disk(self) -> None:
+        """Restore the in-memory material array from a local JSON store.
+
+        This is the persistence source of truth for the MVP and survives
+        Streamlit process restarts because the source file lives under the
+        project data directory rather than in the ephemeral session object.
+        """
+        self.materials = []
+        if not self.materials_file.exists():
+            return
+
+        try:
+            payload = json.loads(self.materials_file.read_text(encoding="utf-8"))
+            if isinstance(payload, dict):
+                records = payload.get("materials") or payload.get("items") or []
+            elif isinstance(payload, list):
+                records = payload
+            else:
+                records = []
+
+            if not isinstance(records, list):
+                records = []
+
+            for record in records:
+                if isinstance(record, dict):
+                    self.materials.append(record)
+        except Exception:
+            self.materials = []
+
+    def _persist_materials_to_disk(self) -> None:
+        """Write the material list to the JSON file in a safe, simple shape."""
+        self.materials_dir.mkdir(parents=True, exist_ok=True)
+        payload = {"materials": self.materials}
+        self.materials_file.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+
+    @staticmethod
+    def _safe_uploaded_name(name: str) -> str:
+        raw = Path(str(name or "Untitled material")).name
+        clean = re.sub(r"[^A-Za-z0-9_.-]+", "_", raw)
+        return clean.strip("._") or "uploaded_material"
+
+    @staticmethod
+    def _material_file_hash(file_bytes: bytes) -> str:
+        return hashlib.sha256(file_bytes).hexdigest()
+
     def add_material(
         self,
         name: str,
         content: str,
         source_type: str = "upload",
+        file_path: Optional[str] = None,
+        file_hash: Optional[str] = None,
+        page_count: int = 0,
     ) -> Dict[str, Any]:
         material_name = (name or "Untitled material").strip()
         material_content = (content or "").strip()
@@ -497,24 +627,168 @@ class StudyAssistant:
             if word not in stop_words
         ][:6]
 
+        file_type = Path(material_name).suffix.lower().lstrip(".") or "note"
+        file_path = str(file_path) if file_path else ""
+        file_hash = file_hash or ""
+
+        # Duplicate handling: reuse the existing file-backed record when the
+        # file hash or canonical persisted path is already known.
+        existing = None
+        for item in self.materials:
+            if file_hash and item.get("file_hash") == file_hash:
+                existing = item
+                break
+            if file_path and item.get("file_path") == file_path:
+                existing = item
+                break
+            if item.get("name") == material_name:
+                existing = item
+                break
+
+        if existing is not None:
+            existing.update({
+                "name": material_name,
+                "source": material_name,
+                "content": material_content,
+                "text": material_content,
+                "source_type": source_type,
+                "file_type": file_type,
+                "page_count": page_count,
+                "uploaded_at": self._now(),
+                "short_notes": short_notes,
+                "similar_words": similar_words,
+                "status": "Ready",
+                "uploaded": "Just now",
+                "file_path": file_path or existing.get("file_path", ""),
+                "file_hash": file_hash or existing.get("file_hash", ""),
+            })
+            self._persist_materials_to_disk()
+            return deepcopy(existing)
+
         material = {
             "id": len(self.materials) + 1,
             "name": material_name,
+            "source": material_name,
             "content": material_content,
+            "text": material_content,
             "source_type": source_type,
+            "file_type": file_type,
+            "page_count": page_count,
             "uploaded_at": self._now(),
             "short_notes": short_notes,
             "similar_words": similar_words,
             "status": "Ready",
             "uploaded": "Just now",
+            "file_path": file_path,
+            "file_hash": file_hash,
         }
 
         self.materials.append(material)
+        self._persist_materials_to_disk()
 
         return deepcopy(material)
 
     def get_materials(self) -> List[Dict[str, Any]]:
         return deepcopy(self.materials)
+
+    def load_materials(self) -> List[Dict[str, Any]]:
+        self._load_materials_from_disk()
+        return deepcopy(self.materials)
+
+    def save_materials(self) -> None:
+        self._persist_materials_to_disk()
+
+    def rebuild_rag_from_persisted_materials(self) -> Dict[str, Any]:
+        """Rebuild the in-memory FAISS pair from PDF files recorded on disk.
+
+        Used when the app loses session state but the uploaded PDF remains in
+        the project data/uploads directory and its material record remains in
+        materials.json.
+        """
+        pdf_records: List[Dict[str, Any]] = []
+        for material in self.materials:
+            file_path = material.get("file_path") or ""
+            if not file_path:
+                continue
+            path = Path(file_path)
+            if not path.exists() or path.suffix.lower() != ".pdf":
+                continue
+            try:
+                file_bytes = path.read_bytes()
+                page_records = StudyAssistant.extract_pdf_page_records(file_bytes, material.get("name") or path.name)
+                pdf_records.extend(page_records)
+            except Exception:
+                continue
+
+        if not pdf_records:
+            self.faiss_index = None
+            self.faiss_metadata = []
+            return {"index": None, "metadata": []}
+
+        chunks = StudyAssistant.chunk_page_records(pdf_records)
+        embedded = self.embed_chunks(chunks)
+        rag = StudyAssistant.build_faiss_index(embedded)
+        self.faiss_index = rag.get("index")
+        self.faiss_metadata = rag.get("metadata") or []
+        return rag
+
+    @staticmethod
+    def sanitize_material_path(file_path: str) -> str:
+        # Enforce the material file source to stay inside the local uploads tree.
+        if not isinstance(file_path, str):
+            return ""
+        path = Path(file_path)
+        try:
+            resolved = path.resolve(strict=False)
+            base_root = Path("data/uploads").resolve(strict=False)
+            if base_root not in resolved.parents and resolved != base_root:
+                return str(base_root / path.name)
+        except Exception:
+            pass
+        return str(path)
+
+    @staticmethod
+    def _gemini_error_code(exc: Exception) -> Optional[int]:
+        code = getattr(exc, "code", None)
+        if isinstance(code, int):
+            return code
+
+        status_code = getattr(exc, "status_code", None)
+        if isinstance(status_code, int):
+            return status_code
+
+        message = str(getattr(exc, "message", None) or str(exc) or "")
+        match = re.search(r"\b(400|401|403|404|429|500|503)\b", message)
+        return int(match.group(1)) if match else None
+
+    @staticmethod
+    def _safe_gemini_error_message(exc: Exception, api_key: str) -> str:
+        message = str(getattr(exc, "message", None) or str(exc) or "").strip()
+        if api_key:
+            message = message.replace(api_key, "[redacted]")
+        return message or "No additional error details were provided."
+
+    @classmethod
+    def _gemini_error_response(cls, exc: Exception, model: str, api_key: str) -> str:
+        code = cls._gemini_error_code(exc)
+        safe_message = cls._safe_gemini_error_message(exc, api_key)
+        print(f"Gemini error [{type(exc).__name__}]: {safe_message}")
+
+        if code == 400:
+            return f"Gemini request failed (HTTP 400). Check the request and model configuration. {safe_message}"
+        if code == 401:
+            return "Gemini authentication failed. Check GEMINI_API_KEY and API key restrictions."
+        if code == 403:
+            return "Gemini permission denied. Check GEMINI_API_KEY permissions and API key restrictions."
+        if code == 404:
+            return f"Gemini model '{model}' was not found. Check GEMINI_MODEL."
+        if code == 429:
+            return "Gemini quota/rate limit reached. Please try again later."
+        if code == 500:
+            return "Gemini server error. Please try again later."
+        if code == 503:
+            return "Gemini is temporarily unavailable. Please try again."
+        return f"Gemini request failed: {safe_message}"
 
     def generate_answer(self, question: str, retrieved_chunks: List[Dict[str, Any]]) -> str:
         """Generate a source-grounded answer from retrieved chunk metadata alone.
@@ -523,10 +797,10 @@ class StudyAssistant:
         Empty or invalid chunk input returns the exact product fallback and
         bypasses any Gemini API call. If the API key is missing, a clear
         configuration error is raised. If the active Gemini SDK cannot answer,
-        the service surfaces a clear exception instead of inventing a response.
+        the service reports a provider-unavailable string rather than the
+        study-material fallback for retriable provider outages.
         """
         fallback = "I couldn't find this information in the study material."
-
         if not isinstance(question, str) or not question.strip():
             raise ValueError("Question must be a non-empty string.")
 
@@ -574,9 +848,11 @@ class StudyAssistant:
 
         api_key = os.getenv("GEMINI_API_KEY")
         if not api_key:
-            raise ValueError("GEMINI_API_KEY is not configured.")
+            raise ValueError(
+                "GEMINI_API_KEY is not configured. Add GEMINI_API_KEY to the .env file."
+            )
 
-        model = os.getenv("GEMINI_MODEL", "gemini-3.6-flash")
+        model = os.getenv("GEMINI_MODEL", "gemini-3.8-flash").strip()
         study_material = "\n\n".join(
             f"[page {chunk.get('page') if chunk.get('page') is not None else 'unknown'}, source {chunk.get('source') or 'unknown'}]\n{chunk['text']}"
             for chunk in valid_chunks
@@ -610,15 +886,32 @@ class StudyAssistant:
 
         try:
             from google import genai
+
             client = genai.Client(api_key=api_key)
-            response = client.models.generate_content(model=model, contents=prompt)
-            answer = getattr(response, "text", None)
-            if not isinstance(answer, str):
-                answer = str(response)
-            answer = answer.strip()
-            return answer
+            for attempt in range(1, 4):
+                try:
+                    response = client.models.generate_content(
+                        model=model,
+                        contents=prompt,
+                    )
+                    answer = getattr(response, "text", None)
+                    if not isinstance(answer, str) or not answer.strip():
+                        raise RuntimeError(
+                            "Gemini returned an empty or invalid response."
+                        )
+                    return answer.strip()
+                except Exception as exc:
+                    code = self._gemini_error_code(exc)
+                    if code in {429, 500, 503} and attempt < 3:
+                        safe_message = self._safe_gemini_error_message(exc, api_key)
+                        print(f"Gemini error [{type(exc).__name__}]: {safe_message}")
+                        time.sleep(0.5 * (2 ** (attempt - 1)))
+                        continue
+                    if code in {429, 500, 503}:
+                        return self._gemini_error_response(exc, model, api_key)
+                    return self._gemini_error_response(exc, model, api_key)
         except Exception as exc:
-            raise RuntimeError(f"Gemini API generation failed: {exc}") from exc
+            return self._gemini_error_response(exc, model, api_key)
 
     def answer_question(self, question: str) -> Dict[str, Any]:
         normalized = self._normalize(question)

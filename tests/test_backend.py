@@ -1,3 +1,6 @@
+import json
+from pathlib import Path
+
 import pytest
 
 from services.study_assistant import StudyAssistant
@@ -166,6 +169,15 @@ def test_study_assistant_tracks_uploads_history_and_saved_answers():
     assert len(assistant.get_saved_answers()) == 1
 
 
+def test_add_material_preserves_text_alias_for_ui_materials_list():
+    assistant = StudyAssistant()
+    material = assistant.add_material("Biology Notes", "Photosynthesis converts sunlight into chemical energy.")
+
+    assert material["name"] == "Biology Notes"
+    assert material["text"] == "Photosynthesis converts sunlight into chemical energy."
+    assert material["content"] == "Photosynthesis converts sunlight into chemical energy."
+
+
 def test_chunk_page_records_splits_long_pages_and_preserves_metadata():
     page_records = [
         {
@@ -236,6 +248,55 @@ def test_embed_chunks_handles_empty_and_invalid_inputs_safely():
             "embedding": [4.0, 5.0, 6.0],
         }
     ]
+
+
+def test_material_persistence_round_trip_and_duplicate_flow(tmp_path):
+    storage_root = tmp_path / "data"
+    upload_path = storage_root / "uploads" / "Frontend_Interview_Prep.pdf"
+    upload_path.parent.mkdir(parents=True, exist_ok=True)
+    upload_path.write_bytes(b"%PDF-1.4 synthetic sample")
+
+    assistant = StudyAssistant(storage_root=storage_root)
+    material = assistant.add_material(
+        "Frontend_Interview_Prep.pdf",
+        "React is a UI library used to build interfaces.",
+        file_path=str(upload_path),
+        file_hash="hash-frontend-interview-prep",
+        page_count=8,
+    )
+
+    assert material["id"] == 1
+    assert material["name"] == "Frontend_Interview_Prep.pdf"
+    assert material["file_path"] == str(upload_path)
+    assert material["status"] == "Ready"
+
+    assistant2 = StudyAssistant(storage_root=storage_root)
+    materials = assistant2.get_materials()
+    assert len(materials) == 1
+    assert materials[0]["name"] == "Frontend_Interview_Prep.pdf"
+    assert materials[0]["file_path"] == str(upload_path)
+    assert materials[0]["id"] == 1
+
+    # Duplicate upload should update meaningfully and not add another record.
+    assistant3 = StudyAssistant(storage_root=storage_root)
+    material_dup = assistant3.add_material(
+        "Frontend_Interview_Prep.pdf",
+        "React is a UI library used to build interfaces.",
+        file_path=str(upload_path),
+        file_hash="hash-frontend-interview-prep",
+        page_count=8,
+    )
+    assert len(assistant3.get_materials()) == 1
+    assert material_dup["name"] == "Frontend_Interview_Prep.pdf"
+
+    persisted_path = Path(materials[0]["file_path"])
+    assert persisted_path.exists()
+
+
+def test_persistence_store_load_list_is_empty_for_missing_material_file(tmp_path):
+    storage_root = tmp_path / "data"
+    assistant = StudyAssistant(storage_root=storage_root)
+    assert assistant.get_materials() == []
 
 
 def test_embed_chunks_real_model_smoke_check():
@@ -340,7 +401,7 @@ def test_generate_answer_returns_mocked_grounded_answer_and_includes_requested_c
     )
 
     assert answer == "Photosynthesis turns light energy into chemical energy."
-    assert captured["model"] == "gemini-3.6-flash"
+    assert captured["model"] == "gemini-3.8-flash"
     assert "What is photosynthesis?" in captured["contents"]
     assert "Photosynthesis turns light energy into chemical energy." in captured["contents"]
 
@@ -364,6 +425,34 @@ def test_generate_answer_returns_fallback_for_empty_or_invalid_retrieval(monkeyp
     fallback = "I couldn't find this information in the study material."
     assert assistant.generate_answer("What is photosynthesis?", []) == fallback
     assert assistant.generate_answer("What is photosynthesis?", [{"text": "   ", "page": 1, "source": "bio.pdf"}]) == fallback
+
+
+def test_generate_answer_returns_provider_message_when_gemini_request_fails(monkeypatch):
+    assistant = StudyAssistant()
+    monkeypatch.setenv("GEMINI_API_KEY", "test-key")
+
+    class FakeModels:
+        def generate_content(self, model, contents):
+            raise RuntimeError("503 UNAVAILABLE")
+
+    class FakeClient:
+        def __init__(self, api_key):
+            self.api_key = api_key
+            self.models = FakeModels()
+
+    try:
+        from google import genai
+    except Exception:
+        genai = None
+
+    if genai is not None:
+        monkeypatch.setattr(genai, "Client", FakeClient)
+
+    provider_message = "Gemini is temporarily unavailable. Please try again."
+    assert assistant.generate_answer(
+        "What is photosynthesis?",
+        [{"text": "Photosynthesis turns light energy into chemical energy.", "page": 1, "source": "bio.pdf"}],
+    ) == provider_message
 
 
 def test_generate_answer_requires_gemini_api_key(monkeypatch):

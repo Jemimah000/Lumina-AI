@@ -14,12 +14,29 @@ with open("assets/style.css", encoding="utf-8") as css_file:
     st.markdown(f"<style>{css_file.read()}</style>", unsafe_allow_html=True)
 
 PAGE_LABELS = ["Dashboard", "Materials", "History", "Saved", "Upload", "Ask AI"]
-UPLOAD_DIR = Path("data/uploads")
+MATERIALS_DIR = Path("data/materials")
+MATERIALS_DIR.mkdir(parents=True, exist_ok=True)
 
 if "assistant" not in st.session_state:
     st.session_state.assistant = StudyAssistant()
+assistant = st.session_state.assistant
+
+
+def sync_streamlit_state_from_assistant() -> None:
+    assistant = st.session_state.get("assistant")
+    if assistant is None:
+        return
+    st.session_state.materials = assistant.get_materials()
+    st.session_state.faiss_index = assistant.faiss_index
+    st.session_state.faiss_metadata = getattr(assistant, "faiss_metadata", [])
+
+
 if "materials" not in st.session_state:
-    st.session_state.materials = []
+    sync_streamlit_state_from_assistant()
+if "faiss_index" not in st.session_state:
+    sync_streamlit_state_from_assistant()
+if "faiss_metadata" not in st.session_state:
+    sync_streamlit_state_from_assistant()
 
 
 def normalize_page(raw_page: str) -> str:
@@ -37,7 +54,7 @@ def get_route_page() -> str:
 
 def nav_link(label: str, active_page: str) -> str:
     state = "active" if label == active_page else ""
-    return f'<a class="nav-item {state}" href="?page={label}">{label}</a>'
+    return f'<a class="nav-item {state}" href="?page={label}" target="_self">{label}</a>'
 
 
 def render_top_nav(active_page: str) -> None:
@@ -50,8 +67,8 @@ def render_top_nav(active_page: str) -> None:
         <div class="brand">Lumina AI</div>
         <div class="nav-items">{nav_items}</div>
         <div class="top-actions">
-            <a class="action-link" href="?page=Upload">Upload</a>
-            <a class="action-pill" href="?page=Ask AI">Ask AI</a>
+            <a class="action-link" href="?page=Upload" target="_self">Upload</a>
+            <a class="action-pill" href="?page=Ask AI" target="_self">Ask AI</a>
         </div>
     </div>
     """
@@ -72,8 +89,8 @@ def render_dashboard() -> None:
                 No hallucinations. Just focus.
             </p>
             <div class="hero-links">
-                <a class="btn-primary" href="?page=Ask AI">Ask Your Notes</a>
-                <a class="btn-ghost" href="?page=Upload">Upload Materials</a>
+                <a class="btn-primary" href="?page=Ask AI" target="_self">Ask Your Notes</a>
+                <a class="btn-ghost" href="?page=Upload" target="_self">Upload Materials</a>
             </div>
             """,
             unsafe_allow_html=True,
@@ -159,20 +176,31 @@ def render_materials() -> None:
             <div class="sidebar-footer"><a>ⓘ &nbsp; Help</a><a>♙ &nbsp; Privacy</a></div>
           </aside>
           <section class="materials-main">
-            <div class="materials-heading"><div><h1>My Study Materials 📚</h1><p>Manage your uploaded notes, textbooks, and resources. Let Lumina help you study smarter.</p></div><a class="icon-upload" href="?page=Upload">↥</a></div>
+            <div class="materials-heading"><div><h1>My Study Materials 📚</h1><p>Manage your uploaded notes, textbooks, and resources. Let Lumina help you study smarter.</p></div><a class="icon-upload" href="?page=Upload" target="_self">↥</a></div>
         """,
         unsafe_allow_html=True,
     )
+
+    # Close the structural HTML shell before rendering the Streamlit widgets.
+    # This avoids nesting streamlit widgets inside the raw HTML section shell.
+    st.markdown("</section></div>", unsafe_allow_html=True)
+
     tab_col, search_col = st.columns([1.4, 1], gap="medium")
     with tab_col:
         selected_tab = st.radio("Material filter", ["All", "Recent", "Favorites"], horizontal=True, label_visibility="collapsed")
     with search_col:
         search_term = st.text_input("Search materials", placeholder="⌕  Search materials...", label_visibility="collapsed")
 
-    materials = st.session_state.materials
+    sync_streamlit_state_from_assistant()
+    assistant = st.session_state.assistant
+    materials = assistant.get_materials()
     if search_term.strip():
         query = search_term.lower().strip()
-        materials = [item for item in materials if query in item["name"].lower() or query in item["text"].lower()]
+        materials = [
+            item for item in materials
+            if query in item["name"].lower()
+            or query in (item.get("text") or item.get("content") or "").lower()
+        ]
     if selected_tab == "Recent":
         materials = materials[-3:]
     elif selected_tab == "Favorites":
@@ -182,18 +210,20 @@ def render_materials() -> None:
     if not materials:
         st.markdown('<div class="empty-materials">No materials yet. Upload your first note to generate short notes and similar words.</div>', unsafe_allow_html=True)
     for index, material in enumerate(materials):
-        file_type = Path(material["name"]).suffix.replace(".", "").upper() or "NOTE"
+        name = material.get("name") or "Untitled material"
+        file_type = Path(name).suffix.replace(".", "").upper() or "PDF"
         status = material.get("status", "Ready")
+        uploaded = material.get("uploaded", material.get("uploaded_at", "Just now"))
         st.markdown(
-            f'''<div class="material-card"><div class="file-icon">▣</div><span class="status-badge">◉ {status}</span><h3>{material["name"]}</h3><p class="file-meta">▧ {file_type} &nbsp; ◷ {material.get("uploaded", "Just now")}</p><div class="card-actions"><form><button formaction="?page=Ask AI" class="ask-card-button">✦ Ask AI</button></form><span class="open-card">↗</span></div></div>''',
+            f'''<div class="material-card"><div class="file-icon">▣</div><span class="status-badge">◉ {status}</span><h3>{name}</h3><p class="file-meta">▧ {file_type} &nbsp; ◷ {uploaded}</p><div class="card-actions"><form action="?page=Ask AI" method="get" target="_self"><button formaction="?page=Ask AI" class="ask-card-button">✦ Ask AI</button></form><span class="open-card">↗</span></div></div>''',
             unsafe_allow_html=True,
         )
-        with st.expander(f"View notes: {material['name']}", expanded=False):
+        with st.expander(f"View notes: {name}", expanded=False):
             st.markdown("**Short notes**")
-            st.write(material["short_notes"])
+            st.write(material.get("short_notes", ""))
             st.markdown("**Similar words**")
-            st.write(", ".join(material["similar_words"]) or "No related terms found")
-    st.markdown('</div></section></div>', unsafe_allow_html=True)
+            st.write(", ".join(material.get("similar_words") or []) or "No related terms found")
+    st.markdown('</div>', unsafe_allow_html=True)
 
 
 def render_history() -> None:
@@ -220,29 +250,103 @@ def render_upload() -> None:
         '<p class="page-copy">Choose a PDF from your computer. Lumina will save it, create short notes, and find similar words.</p>',
         unsafe_allow_html=True,
     )
+
     uploaded_files = st.file_uploader(
         "Select PDF files from your computer",
         type=["pdf", "txt", "md", "docx"],
         accept_multiple_files=True,
         help="You can select one or more PDF files from your computer.",
     )
+
     if uploaded_files:
         st.caption(f"Selected {len(uploaded_files)} file(s): " + ", ".join(file.name for file in uploaded_files))
+
     if uploaded_files and st.button("Upload and create notes"):
-        UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+        MATERIALS_DIR.mkdir(parents=True, exist_ok=True)
+        assistant = st.session_state.assistant
+        pdf_records = []
+        errors = []
+
         for uploaded_file in uploaded_files:
             try:
                 file_bytes = uploaded_file.getvalue()
-                text = st.session_state.assistant.extract_text(uploaded_file.name, file_bytes)
-                material = st.session_state.assistant.add_material(uploaded_file.name, text)
+                file_hash = StudyAssistant._material_file_hash(file_bytes)
+                safe_name = StudyAssistant._safe_uploaded_name(uploaded_file.name)
+                safe_path = MATERIALS_DIR / safe_name
+                safe_path.write_bytes(file_bytes)
+
+                text = assistant.extract_text(uploaded_file.name, file_bytes)
+                material = assistant.add_material(
+                    uploaded_file.name,
+                    text,
+                    file_path=str(safe_path),
+                    file_hash=file_hash,
+                    page_count=0,
+                )
+
                 material["uploaded"] = "Just now"
                 material["status"] = "Ready"
-                if not any(item["name"] == material["name"] for item in st.session_state.materials):
-                    st.session_state.materials.append(material)
-                (UPLOAD_DIR / uploaded_file.name).write_bytes(file_bytes)
-                st.success(f"{uploaded_file.name} processed successfully.")
-            except ValueError as error:
+                material["source"] = uploaded_file.name
+                material["file_type"] = Path(uploaded_file.name).suffix.lower().lstrip(".") or "note"
+
+                if uploaded_file.name.lower().endswith(".pdf"):
+                    records = StudyAssistant.extract_pdf_page_records(file_bytes, uploaded_file.name)
+                    pdf_records.extend(records)
+                    material["page_count"] = len(records)
+                    material["source"] = uploaded_file.name
+                    material["file_type"] = "pdf"
+                else:
+                    material["page_count"] = 0
+
+                assistant.materials[-1] = material
+                st.session_state.assistant = assistant
+                st.session_state.materials = assistant.get_materials()
+
+            except Exception as error:
+                errors.append(f"{uploaded_file.name}: {error}")
                 st.error(f"{uploaded_file.name}: {error}")
+
+        if errors:
+            st.error("One or more files failed during the upload processing chain.")
+            return
+
+        # Build the uploaded PDF RAG state once and persist it on the
+        # canonical session assistant object and explicitly on streamlit
+        # session memory so Ask AI uses the same FAISS pair after reloads.
+        if pdf_records:
+            try:
+                chunks = StudyAssistant.chunk_page_records(pdf_records)
+                embedded = assistant.embed_chunks(chunks)
+                rag = StudyAssistant.build_faiss_index(embedded)
+
+                if rag.get("index") is None or not rag.get("metadata"):
+                    raise ValueError("FAISS index or metadata is empty after PDF processing.")
+
+                assistant.faiss_index = rag["index"]
+                assistant.faiss_metadata = rag["metadata"]
+                st.session_state.assistant = assistant
+                st.session_state.faiss_index = rag["index"]
+                st.session_state.faiss_metadata = rag["metadata"]
+
+                st.success(f"{uploaded_file.name} processed successfully.")
+                sync_streamlit_state_from_assistant()
+
+            except Exception as error:
+                st.error(f"FAISS build failed: {error}")
+                assistant.faiss_index = None
+                assistant.faiss_metadata = []
+                st.session_state.assistant = assistant
+                st.session_state.faiss_index = None
+                st.session_state.faiss_metadata = []
+                return
+        else:
+            assistant.faiss_index = None
+            assistant.faiss_metadata = []
+            st.session_state.assistant = assistant
+            st.session_state.faiss_index = None
+            st.session_state.faiss_metadata = []
+
+        sync_streamlit_state_from_assistant()
 
 
 def render_ask_ai() -> None:
@@ -251,16 +355,54 @@ def render_ask_ai() -> None:
         '<p class="page-copy">Ask a question and receive a source-grounded explanation from your materials.</p>',
         unsafe_allow_html=True,
     )
-    question = st.text_area("What would you like to understand today?", placeholder="Explain photosynthesis in simple steps")
+
+    question = st.text_area(
+        "What would you like to understand today?",
+        placeholder="Explain photosynthesis in simple steps",
+    )
+
     if st.button("Generate Answer"):
         if question.strip():
-            result = st.session_state.assistant.answer_question(question)
-            st.success(result["answer"])
-            if result["key_points"]:
-                for point in result["key_points"]:
-                    st.markdown(f"**{point['title']}**: {point['detail']}")
-            if result["source_materials"]:
-                st.caption(f"Source: {result['source_materials'][0]['title']}")
+            sync_streamlit_state_from_assistant()
+            assistant = st.session_state.assistant
+            index = st.session_state.get("faiss_index") or assistant.faiss_index
+            metadata = st.session_state.get("faiss_metadata") or assistant.faiss_metadata or []
+
+            # If the current session lost the FAISS vector state but the
+            # material JSON and PDF bytes still exist on disk, rebuild the
+            # RAG objects deterministically from those persisted sources.
+            if index is None or not metadata:
+                rag = assistant.rebuild_rag_from_persisted_materials()
+                index = rag.get("index") if isinstance(rag, dict) else None
+                metadata = rag.get("metadata") if isinstance(rag, dict) else []
+
+            assistant.faiss_index = index
+            assistant.faiss_metadata = metadata
+            st.session_state.assistant = assistant
+            st.session_state.faiss_index = index
+            st.session_state.faiss_metadata = metadata
+
+            if index is not None and metadata:
+                try:
+                    retrieved_chunks = assistant.retrieve_relevant_chunks(
+                        question,
+                        index,
+                        metadata,
+                        k=5,
+                    )
+                except Exception:
+                    retrieved_chunks = []
+
+                if retrieved_chunks:
+                    answer = assistant.generate_answer(question, retrieved_chunks)
+                    st.success(answer)
+                    first = retrieved_chunks[0]
+                    st.caption(f"Source: {first.get('source') or 'Uploaded material'} | Page {first.get('page') or 'unknown'}")
+                    return
+
+            # Exact fallback sentence when no RAG items are available.
+            st.success("I couldn't find this information in the study material.")
+            st.caption("Source: Uploaded material")
         else:
             st.warning("Please enter a question first.")
 
