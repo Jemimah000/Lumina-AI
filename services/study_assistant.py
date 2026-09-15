@@ -510,7 +510,10 @@ class StudyAssistant:
         if not isinstance(query_embedding, list) or not query_embedding:
             return []
 
-        return self.search_faiss(query_embedding, index, metadata, k)
+        results = self.search_faiss(query_embedding, index, metadata, k)
+        # A nearest neighbour always exists mathematically; it is not always
+        # relevant study material, so weak matches must not reach Gemini.
+        return [item for item in results if item.get("similarity", 0.0) >= 0.35]
 
     @staticmethod
     def _now() -> str:
@@ -560,6 +563,61 @@ class StudyAssistant:
     @staticmethod
     def _material_file_hash(file_bytes: bytes) -> str:
         return hashlib.sha256(file_bytes).hexdigest()
+
+    def process_pdf_upload(self, file_name: str, file_bytes: bytes) -> Dict[str, Any]:
+        """Process one PDF through the complete, canonical RAG upload path.
+
+        A material is persisted only after extraction, chunking, embedding, and
+        FAISS construction have all succeeded. The active index represents all
+        persisted PDFs, keeping searchable state aligned with Materials.
+        """
+        if Path(file_name).suffix.lower() != ".pdf":
+            raise ValueError("Only PDF files can be processed by the PDF RAG pipeline.")
+        if not file_bytes:
+            raise ValueError("The uploaded PDF is empty.")
+
+        source = Path(file_name).name
+        page_records = self.extract_pdf_page_records(file_bytes, source)
+        if not page_records:
+            raise ValueError("No readable text was found in the uploaded PDF.")
+        chunks = self.chunk_page_records(page_records)
+        if not chunks:
+            raise ValueError("No usable text chunks were created from the uploaded PDF.")
+
+        # Validate the new PDF before changing disk state.
+        if not self.embed_chunks(chunks):
+            raise ValueError("No embeddings were created for the uploaded PDF.")
+
+        safe_name = self._safe_uploaded_name(source)
+        upload_path = self.upload_dir / safe_name
+        uploaded_hash = self._material_file_hash(file_bytes)
+        candidate_records = list(page_records)
+        for material in self.materials:
+            path = Path(material.get("file_path") or "")
+            if (path.suffix.lower() != ".pdf" or not path.exists()
+                    or material.get("file_hash") == uploaded_hash):
+                continue
+            candidate_records.extend(self.extract_pdf_page_records(
+                path.read_bytes(), material.get("name") or path.name
+            ))
+
+        embedded_chunks = self.embed_chunks(self.chunk_page_records(candidate_records))
+        rag = self.build_faiss_index(embedded_chunks)
+        if rag.get("index") is None or not rag.get("metadata"):
+            raise ValueError("FAISS index creation failed for the uploaded PDF.")
+
+        self.upload_dir.mkdir(parents=True, exist_ok=True)
+        upload_path.write_bytes(file_bytes)
+        material = self.add_material(
+            source,
+            "\n".join(record["text"] for record in page_records),
+            file_path=str(upload_path),
+            file_hash=uploaded_hash,
+            page_count=len(page_records),
+        )
+        self.faiss_index = rag["index"]
+        self.faiss_metadata = rag["metadata"]
+        return {"material": material, "index": self.faiss_index, "metadata": self.faiss_metadata}
 
     def add_material(
         self,
@@ -914,112 +972,36 @@ class StudyAssistant:
             return self._gemini_error_response(exc, model, api_key)
 
     def answer_question(self, question: str) -> Dict[str, Any]:
-        normalized = self._normalize(question)
+        """Answer only through active FAISS retrieval and Gemini generation."""
+        fallback = "I couldn't find this information in the study material."
+        if not isinstance(question, str) or not question.strip():
+            return {"answer": "Please enter a question first.", "key_points": [], "source_materials": []}
 
-        if not normalized:
-            return {
-                "answer": "Please ask a question about your study materials.",
-                "key_points": [],
-                "source_materials": [],
-            }
+        if self.faiss_index is None or not self.faiss_metadata:
+            self.rebuild_rag_from_persisted_materials()
+        retrieved = self.retrieve_relevant_chunks(
+            question, self.faiss_index, self.faiss_metadata, k=5
+        )
+        if not retrieved:
+            return {"answer": fallback, "key_points": [], "source_materials": []}
 
-        for keyword, response in self.knowledge_base.items():
-            if any(
-                term in normalized
-                for term in [
-                    "hash table",
-                    "hash",
-                    "collision",
-                    "bucket",
-                ]
-            ):
-                if keyword == "hash_table":
-                    return deepcopy(response)
+        try:
+            answer = self.generate_answer(question, retrieved)
+        except ValueError as error:
+            # Configuration errors are surfaced; no local or hardcoded answer
+            # is substituted for the retrieved material.
+            answer = str(error)
 
-        for material in reversed(self.materials):
-            material_text = self._normalize(material["content"])
-
-            if material_text and any(
-                token in material_text
-                for token in self._keywords_from_question(normalized)
-            ):
-                source_materials = [
-                    {
-                        "title": material["name"],
-                        "page": "Relevant section",
-                        "time": material["uploaded_at"],
-                    }
-                ]
-
-                answer = self._build_material_answer(
-                    material,
-                    question,
-                )
-
-                return {
-                    "answer": answer,
-                    "key_points": [
-                        {
-                            "title": "Key idea",
-                            "detail": material["content"][:180]
-                            + (
-                                "..."
-                                if len(material["content"]) > 180
-                                else ""
-                            ),
-                        }
-                    ],
-                    "source_materials": source_materials,
-                }
-
-        for material in reversed(
-            self.knowledge_base.get("materials", [])
-        ):
-            question_words = re.findall(
-                r"[A-Za-z][A-Za-z'-]{3,}",
-                normalized,
-            )
-
-            if any(
-                word in material["text"].lower()
-                for word in question_words
-            ):
-                return {
-                    "answer": material["short_notes"],
-                    "key_points": [
-                        {
-                            "title": "Short notes",
-                            "detail": material["short_notes"],
-                        },
-                        {
-                            "title": "Similar words",
-                            "detail": ", ".join(
-                                material["similar_words"]
-                            ),
-                        },
-                    ],
-                    "source_materials": [
-                        {
-                            "title": material["name"],
-                            "page": "Uploaded note",
-                            "time": "Now",
-                        }
-                    ],
-                }
-
-        return {
-            "answer": (
-                "I could not find a direct match in your uploaded study material. "
-                "Please ask about the specific topic from your lecture notes or upload the relevant file."
-            ),
-            "key_points": [
-                {
-                    "title": "Hint",
-                    "detail": "Try asking about a concept, chapter, formula, or idea from your notes.",
-                }
-            ],
-            "source_materials": [],
-        }
+        sources = []
+        seen = set()
+        for chunk in retrieved:
+            source = chunk.get("source") or "Uploaded material"
+            page = chunk.get("page")
+            key = (source, page)
+            if key not in seen:
+                sources.append({"title": source, "page": page})
+                seen.add(key)
+        return {"answer": answer, "key_points": [], "source_materials": sources, "retrieved_chunks": retrieved}
 
     @staticmethod
     def extract_text(

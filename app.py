@@ -14,29 +14,18 @@ with open("assets/style.css", encoding="utf-8") as css_file:
     st.markdown(f"<style>{css_file.read()}</style>", unsafe_allow_html=True)
 
 PAGE_LABELS = ["Dashboard", "Materials", "History", "Saved", "Upload", "Ask AI"]
-MATERIALS_DIR = Path("data/materials")
-MATERIALS_DIR.mkdir(parents=True, exist_ok=True)
-
 if "assistant" not in st.session_state:
     st.session_state.assistant = StudyAssistant()
 assistant = st.session_state.assistant
 
 
 def sync_streamlit_state_from_assistant() -> None:
-    assistant = st.session_state.get("assistant")
-    if assistant is None:
-        return
-    st.session_state.materials = assistant.get_materials()
-    st.session_state.faiss_index = assistant.faiss_index
-    st.session_state.faiss_metadata = getattr(assistant, "faiss_metadata", [])
+    """Keep the session's single StudyAssistant instance canonical.
 
-
-if "materials" not in st.session_state:
-    sync_streamlit_state_from_assistant()
-if "faiss_index" not in st.session_state:
-    sync_streamlit_state_from_assistant()
-if "faiss_metadata" not in st.session_state:
-    sync_streamlit_state_from_assistant()
+    Materials and Ask AI both read directly from this object; no copied FAISS
+    or material lists are kept in Streamlit session state.
+    """
+    return None
 
 
 def normalize_page(raw_page: str) -> str:
@@ -253,7 +242,7 @@ def render_upload() -> None:
 
     uploaded_files = st.file_uploader(
         "Select PDF files from your computer",
-        type=["pdf", "txt", "md", "docx"],
+        type=["pdf"],
         accept_multiple_files=True,
         help="You can select one or more PDF files from your computer.",
     )
@@ -262,45 +251,14 @@ def render_upload() -> None:
         st.caption(f"Selected {len(uploaded_files)} file(s): " + ", ".join(file.name for file in uploaded_files))
 
     if uploaded_files and st.button("Upload and create notes"):
-        MATERIALS_DIR.mkdir(parents=True, exist_ok=True)
         assistant = st.session_state.assistant
-        pdf_records = []
         errors = []
+        processed = []
 
         for uploaded_file in uploaded_files:
             try:
-                file_bytes = uploaded_file.getvalue()
-                file_hash = StudyAssistant._material_file_hash(file_bytes)
-                safe_name = StudyAssistant._safe_uploaded_name(uploaded_file.name)
-                safe_path = MATERIALS_DIR / safe_name
-                safe_path.write_bytes(file_bytes)
-
-                text = assistant.extract_text(uploaded_file.name, file_bytes)
-                material = assistant.add_material(
-                    uploaded_file.name,
-                    text,
-                    file_path=str(safe_path),
-                    file_hash=file_hash,
-                    page_count=0,
-                )
-
-                material["uploaded"] = "Just now"
-                material["status"] = "Ready"
-                material["source"] = uploaded_file.name
-                material["file_type"] = Path(uploaded_file.name).suffix.lower().lstrip(".") or "note"
-
-                if uploaded_file.name.lower().endswith(".pdf"):
-                    records = StudyAssistant.extract_pdf_page_records(file_bytes, uploaded_file.name)
-                    pdf_records.extend(records)
-                    material["page_count"] = len(records)
-                    material["source"] = uploaded_file.name
-                    material["file_type"] = "pdf"
-                else:
-                    material["page_count"] = 0
-
-                assistant.materials[-1] = material
-                st.session_state.assistant = assistant
-                st.session_state.materials = assistant.get_materials()
+                result = assistant.process_pdf_upload(uploaded_file.name, uploaded_file.getvalue())
+                processed.append(result["material"]["name"])
 
             except Exception as error:
                 errors.append(f"{uploaded_file.name}: {error}")
@@ -308,44 +266,11 @@ def render_upload() -> None:
 
         if errors:
             st.error("One or more files failed during the upload processing chain.")
-            return
-
-        # Build the uploaded PDF RAG state once and persist it on the
-        # canonical session assistant object and explicitly on streamlit
-        # session memory so Ask AI uses the same FAISS pair after reloads.
-        if pdf_records:
-            try:
-                chunks = StudyAssistant.chunk_page_records(pdf_records)
-                embedded = assistant.embed_chunks(chunks)
-                rag = StudyAssistant.build_faiss_index(embedded)
-
-                if rag.get("index") is None or not rag.get("metadata"):
-                    raise ValueError("FAISS index or metadata is empty after PDF processing.")
-
-                assistant.faiss_index = rag["index"]
-                assistant.faiss_metadata = rag["metadata"]
-                st.session_state.assistant = assistant
-                st.session_state.faiss_index = rag["index"]
-                st.session_state.faiss_metadata = rag["metadata"]
-
-                st.success(f"{uploaded_file.name} processed successfully.")
-                sync_streamlit_state_from_assistant()
-
-            except Exception as error:
-                st.error(f"FAISS build failed: {error}")
-                assistant.faiss_index = None
-                assistant.faiss_metadata = []
-                st.session_state.assistant = assistant
-                st.session_state.faiss_index = None
-                st.session_state.faiss_metadata = []
-                return
-        else:
-            assistant.faiss_index = None
-            assistant.faiss_metadata = []
-            st.session_state.assistant = assistant
-            st.session_state.faiss_index = None
-            st.session_state.faiss_metadata = []
-
+        # Do not present the batch as successfully processed when any selected
+        # PDF failed before its RAG representation was ready.
+        if processed and not errors:
+            st.success(", ".join(processed) + " processed successfully.")
+        st.session_state.assistant = assistant
         sync_streamlit_state_from_assistant()
 
 
@@ -365,44 +290,11 @@ def render_ask_ai() -> None:
         if question.strip():
             sync_streamlit_state_from_assistant()
             assistant = st.session_state.assistant
-            index = st.session_state.get("faiss_index") or assistant.faiss_index
-            metadata = st.session_state.get("faiss_metadata") or assistant.faiss_metadata or []
-
-            # If the current session lost the FAISS vector state but the
-            # material JSON and PDF bytes still exist on disk, rebuild the
-            # RAG objects deterministically from those persisted sources.
-            if index is None or not metadata:
-                rag = assistant.rebuild_rag_from_persisted_materials()
-                index = rag.get("index") if isinstance(rag, dict) else None
-                metadata = rag.get("metadata") if isinstance(rag, dict) else []
-
-            assistant.faiss_index = index
-            assistant.faiss_metadata = metadata
-            st.session_state.assistant = assistant
-            st.session_state.faiss_index = index
-            st.session_state.faiss_metadata = metadata
-
-            if index is not None and metadata:
-                try:
-                    retrieved_chunks = assistant.retrieve_relevant_chunks(
-                        question,
-                        index,
-                        metadata,
-                        k=5,
-                    )
-                except Exception:
-                    retrieved_chunks = []
-
-                if retrieved_chunks:
-                    answer = assistant.generate_answer(question, retrieved_chunks)
-                    st.success(answer)
-                    first = retrieved_chunks[0]
-                    st.caption(f"Source: {first.get('source') or 'Uploaded material'} | Page {first.get('page') or 'unknown'}")
-                    return
-
-            # Exact fallback sentence when no RAG items are available.
-            st.success("I couldn't find this information in the study material.")
-            st.caption("Source: Uploaded material")
+            result = assistant.answer_question(question)
+            st.success(result["answer"])
+            if result["source_materials"]:
+                first = result["source_materials"][0]
+                st.caption(f"Source: {first['title']} | Page {first['page']}")
         else:
             st.warning("Please enter a question first.")
 
